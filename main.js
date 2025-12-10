@@ -63,8 +63,10 @@ const fileSelectHandler = function (event) {
 
   fileSelectArea.innerHTML = `<h2>${file.name}</h2>`;
 
-  const mimeType = file.type;
-  const fileExtension = file.name.split(".").pop()
+  let mimeType = file.type;
+  if (mimeType === "image/x-icon") mimeType = "image/vnc.microsoft.icon";
+
+  const fileExtension = file.name.split(".").pop();
 
   inputSearch.value = mimeType || fileExtension;
   searchHandler({ target: inputSearch });
