@@ -7,6 +7,7 @@ import ImageMagickHandler from "./ImageMagick.ts";
 import renameHandler from "./rename.ts";
 import envelopeHandler from "./envelope.ts";
 import svgForeignObjectHandler from "./svgForeignObject.ts";
+import qoiFuHandler from "./qoi-fu.ts";
 
 const handlers: FormatHandler[] = [
   new canvasToBlobHandler(),
@@ -16,5 +17,6 @@ const handlers: FormatHandler[] = [
   new renameHandler(),
   new envelopeHandler(),
   new svgForeignObjectHandler(),
+  new qoiFuHandler(),
 ];
 export default handlers;
