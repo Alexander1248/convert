@@ -93,7 +93,7 @@ class canvasToBlobHandler implements FormatHandler {
 
         this.#ctx.font = font;
         this.#canvas.width = this.#ctx.measureText(string).width;
-        this.#canvas.height = fontSize;
+        this.#canvas.height = Math.floor(fontSize * 1.5);
 
         if (outputFormat.mime === "image/jpeg") {
           this.#ctx.fillStyle = "white";
