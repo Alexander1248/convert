@@ -19,7 +19,9 @@ class markdownHandler implements FormatHandler {
       mime: "text/markdown",
       from: true,
       to: true,
-      internal: "md"
+      internal: "md",
+      category: ["document", "text"],
+      lossless: true // Because markdown to html and html to markdown are both mostly lossless (except for some edge cases)
     },
     {
       name: "HyperText Markup Language",
@@ -28,7 +30,9 @@ class markdownHandler implements FormatHandler {
       mime: "text/html",
       from: true,
       to: true,
-      internal: "html"
+      internal: "html",
+      category: ["document", "text"],
+      lossless: true // Because markdown to html and html to markdown are both mostly lossless (except for some edge cases)
     }
   ];
   public ready = false;
