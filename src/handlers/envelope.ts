@@ -79,7 +79,7 @@ class envelopeHandler implements FormatHandler {
       to: true,
       internal: "html",
       category: ["document", "text"],
-      lossless: false // Because one side conversion is lossy (if I don't right please edit this to be true)
+      lossless: true // Technically not "lossless", but it's about as close as we'll ever get
     }
   ];
 
