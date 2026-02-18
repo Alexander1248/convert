@@ -44,6 +44,10 @@ export class TraversionGraph {
         {from: "image", to: "video", cost: 0.2}, // Almost lossless
         {from: "video", to: "image", cost: 0.4}, // Potentially lossy and more complex
         {from: "image", to: "audio", cost: 1.4}, // Extremely lossy
+        {from: "image", to: "audio", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert images to audio
+        {from: "audio", to: "image", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert audio to images
+        {from: "text", to: "audio", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert text to audio
+        {from: "audio", to: "text", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert audio to text
         {from: "audio", to: "image", cost: 1}, // Very lossy
         {from: "video", to: "audio", cost: 1.4}, // Might be lossy 
         {from: "audio", to: "video", cost: 1}, // Might be lossy
@@ -52,18 +56,18 @@ export class TraversionGraph {
     ];
 
     public addCategoryChangeCost(from: string, to: string, cost: number, handler?: string) {
-        this.categoryChangeCosts.push({from, to, cost, handler});
+        this.categoryChangeCosts.push({from, to, cost, handler: handler?.toLowerCase()});
     }
     public removeCategoryChangeCost(from: string, to: string, handler?: string) {
-        this.categoryChangeCosts = this.categoryChangeCosts.filter(c => !(c.from === from && c.to === to && c.handler === handler));
+        this.categoryChangeCosts = this.categoryChangeCosts.filter(c => !(c.from === from && c.to === to && c.handler === handler?.toLowerCase()));
     }
     public updateCategoryChangeCost(from: string, to: string, cost: number, handler?: string) {
-        const costEntry = this.categoryChangeCosts.find(c => c.from === from && c.to === to && c.handler === handler);
+        const costEntry = this.categoryChangeCosts.find(c => c.from === from && c.to === to && c.handler === handler?.toLowerCase());
         if (costEntry) costEntry.cost = cost;
         else this.addCategoryChangeCost(from, to, cost, handler);
     }
     public hasCategoryChangeCost(from: string, to: string, handler?: string) {
-        return this.categoryChangeCosts.some(c => c.from === from && c.to === to && c.handler === handler);
+        return this.categoryChangeCosts.some(c => c.from === from && c.to === to && c.handler === handler?.toLowerCase());
     }
     /**
      * Initializes the traversion graph based on the supported formats and handlers. This should be called after all handlers have been registered and their supported formats have been cached in window.supportedFormatCache. The graph is built by creating nodes for each unique file format and edges for each possible conversion between formats based on the handlers' capabilities. 
@@ -120,6 +124,8 @@ export class TraversionGraph {
     ) {
         let cost = DEPTH_COST; // Base cost for each conversion step
 
+        const handlerPairs = new Map<string, string>(this.categoryChangeCosts.filter(c => c.handler)
+        .map(c => [`${c.from}->${c.to}`, c.handler] as [string, string]));
         // Calculate category change cost
         const fromCategory = from.format.category || from.format.mime.split("/")[0];
         const toCategory = to.format.category || to.format.mime.split("/")[0];
@@ -129,13 +135,22 @@ export class TraversionGraph {
             if (strictCategories) {
                 cost += this.categoryChangeCosts.reduce((totalCost, c) => {
                     // If the category change defined in CATEGORY_CHANGE_COSTS matches the categories of the formats, add the specified cost. Otherwise, if the categories are the same, add no cost. If the categories differ but no specific cost is defined for that change, add a default cost.
-                    if (fromCategories.includes(c.from) && toCategories.includes(c.to) && (!c.handler || c.handler === handler))
+                    if (fromCategories.includes(c.from) 
+                        && toCategories.includes(c.to)
+                        && (!c.handler || c.handler === handler.toLowerCase())
+                    )
                         return totalCost + c.cost;
                     return totalCost + DEFAULT_CATEGORY_CHANGE_COST;
                 }, 0);
             }
             else if (!fromCategories.some(c => toCategories.includes(c))) {
-                const costs = this.categoryChangeCosts.filter(c => fromCategories.includes(c.from) && toCategories.includes(c.to) && (!c.handler || c.handler === handler)
+                let costs = this.categoryChangeCosts.filter(c => 
+                    fromCategories.includes(c.from) 
+                    && toCategories.includes(c.to)
+                    && (
+                        (!c.handler && handlerPairs.get(`${c.from}->${c.to}`) !== handler.toLowerCase()) 
+                        || c.handler === handler.toLowerCase()
+                    )
                 );
                 if (costs.length === 0) cost += DEFAULT_CATEGORY_CHANGE_COST; // If no specific cost is defined for this category change, use the default cost
                 else cost += Math.min(...costs.map(c => c.cost)); // If multiple category changes are involved, use the lowest cost defined for those changes. This allows for more nuanced cost calculations when formats belong to multiple categories.
@@ -233,7 +248,7 @@ export class TraversionGraph {
                 
                 queue.add({
                     index: edge.to.index,
-                    cost: current.cost + (edge.to.index === toIndex ? 0 : edge.cost),
+                    cost: current.cost + edge.cost,
                     path: current.path.concat({handler: handler, format: edge.to.format}),
                     visitedBorder: visited.length
                 });
