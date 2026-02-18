@@ -53,7 +53,7 @@ export class TraversionGraph {
         {from: "audio", to: "image", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert audio to images
         {from: "text", to: "audio", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert text to audio
         {from: "audio", to: "text", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert audio to text
-        {from: "image", to: "audio", cost: 10.4}, // Extremely lossy
+        {from: "image", to: "audio", cost: 1.4}, // Extremely lossy
         {from: "audio", to: "image", cost: 1}, // Very lossy
         {from: "video", to: "audio", cost: 1.4}, // Might be lossy 
         {from: "audio", to: "video", cost: 1}, // Might be lossy
