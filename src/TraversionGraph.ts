@@ -2,25 +2,28 @@ import { ConvertPathNode, type FileFormat } from "./FormatHandler.ts";
 import handlers from "./handlers";
 import { PriorityQueue } from './PriorityQueue.ts';
 
+interface QueueNode {
+    index: number;
+    cost: number;
+    path: ConvertPathNode[];
+    visitedBorder: number;
+};
+interface CategoryChangeCost {
+    from: string;
+    to: string;
+    handler?: string; // Optional handler name to specify that this cost only applies when using a specific handler for the category change. If not specified, the cost applies to all handlers for that category change.
+    cost: number;
+};
 
-// Parameters for pathfinding algorithm. Adjust as needed.
+
+// Parameters for pathfinding algorithm.
 const DEPTH_COST: number = 1; // Base cost for each conversion step. Higher values will make the algorithm prefer shorter paths more strongly.
-
-const CATEGORY_HARD_SEARCH : boolean = false; // If true, paths that change categories will be penalized based on how many categories differ. If false, any category change will have a fixed penalty.
-const CATEGORY_CHANGE_COSTS : Array<{from: string, to: string, cost: number}> = [
-    {from: "image", to: "video", cost: 0.2}, // Almost lossless
-    {from: "video", to: "image", cost: 0.4}, // Potentially lossy and more complex
-    {from: "image", to: "audio", cost: 2}, // Extremely lossy
-    {from: "audio", to: "image", cost: 1.4}, // Very lossy
-    {from: "video", to: "audio", cost: 1}, // Might be lossy 
-    {from: "audio", to: "video", cost: 1}, // Might be lossy
-    {from: "text", to: "image", cost: 0.5}, // Depends on the content and method, but can be relatively efficient for simple images
-    {from: "image", to: "text", cost: 0.5}, // Depends on the content and method, but can be relatively efficient for simple images
-];
 const DEFAULT_CATEGORY_CHANGE_COST : number = 0.6; // Default cost for category changes not specified in CATEGORY_CHANGE_COSTS
-
 const LOSSY_COST_MULTIPLIER : number = 1.4; // Cost multiplier for lossy conversions. Higher values will make the algorithm prefer lossless conversions more strongly.
-const PRIORITY_COST : number = 0.05; // Cost multiplier for handler priority. Higher values will make the algorithm prefer handlers with higher priority more strongly.
+const HANDLER_PRIORITY_COST : number = 0.2; // Cost multiplier for handler priority. Higher values will make the algorithm prefer handlers with higher priority more strongly.
+const FORMAT_PRIORITY_COST : number = 0.05; // Cost multiplier for format priority. Higher values will make the algorithm prefer formats with higher priority more strongly.
+
+const LOG_FREQUENCY = 1000;
 
 export interface Node {
     mime: string;
@@ -34,18 +37,39 @@ export interface Edge {
     cost: number;
 };
 
-interface QueueNode {
-    index: number;
-    cost: number;
-    path: ConvertPathNode[];
-    visitedBorder: number;
-}
-
 export class TraversionGraph {
     private nodes: Node[] = [];
     private edges: Edge[] = [];
+    private categoryChangeCosts: Array<CategoryChangeCost> = [
+        {from: "image", to: "video", cost: 0.2}, // Almost lossless
+        {from: "video", to: "image", cost: 0.4}, // Potentially lossy and more complex
+        {from: "image", to: "audio", cost: 1.4}, // Extremely lossy
+        {from: "audio", to: "image", cost: 1}, // Very lossy
+        {from: "video", to: "audio", cost: 1.4}, // Might be lossy 
+        {from: "audio", to: "video", cost: 1}, // Might be lossy
+        {from: "text", to: "image", cost: 0.5}, // Depends on the content and method, but can be relatively efficient for simple images
+        {from: "image", to: "text", cost: 0.5}, // Depends on the content and method, but can be relatively efficient for simple images
+    ];
 
-    public init() {
+    public addCategoryChangeCost(from: string, to: string, cost: number, handler?: string) {
+        this.categoryChangeCosts.push({from, to, cost, handler});
+    }
+    public removeCategoryChangeCost(from: string, to: string, handler?: string) {
+        this.categoryChangeCosts = this.categoryChangeCosts.filter(c => !(c.from === from && c.to === to && c.handler === handler));
+    }
+    public updateCategoryChangeCost(from: string, to: string, cost: number, handler?: string) {
+        const costEntry = this.categoryChangeCosts.find(c => c.from === from && c.to === to && c.handler === handler);
+        if (costEntry) costEntry.cost = cost;
+        else this.addCategoryChangeCost(from, to, cost, handler);
+    }
+    public hasCategoryChangeCost(from: string, to: string, handler?: string) {
+        return this.categoryChangeCosts.some(c => c.from === from && c.to === to && c.handler === handler);
+    }
+    /**
+     * Initializes the traversion graph based on the supported formats and handlers. This should be called after all handlers have been registered and their supported formats have been cached in window.supportedFormatCache. The graph is built by creating nodes for each unique file format and edges for each possible conversion between formats based on the handlers' capabilities. 
+     * @param strictCategories If true, the algorithm will apply category change costs more strictly, even when formats share categories. This can lead to more accurate pathfinding at the cost of potentially longer paths and increased search time. If false, category change costs will only be applied when formats do not share any categories, allowing for more flexible pathfinding that may yield shorter paths but with less nuanced cost calculations.
+     */
+    public init(strictCategories: boolean = false) {
         console.log("Initializing traversion graph...");
         const startTime = performance.now();
         let handlerIndex = 0;
@@ -64,49 +88,78 @@ export class TraversionGraph {
             fromIndices.forEach(from => {
                 toIndices.forEach(to => {
                     if (from.index === to.index) return; // No self-loops
-                    let cost = DEPTH_COST; // Base cost for each conversion step
-                    const fromCategory = from.format.category || from.format.mime.split("/")[0];
-                    const toCategory = to.format.category || to.format.mime.split("/")[0];
-                    if (fromCategory && toCategory) {
-                        const fromCategories = Array.isArray(fromCategory) ? fromCategory : [fromCategory];
-                        const toCategories = Array.isArray(toCategory) ? toCategory : [toCategory];
-                        if (CATEGORY_HARD_SEARCH) {
-                            cost += CATEGORY_CHANGE_COSTS.reduce((totalCost, c) => {
-                                // If the category change defined in CATEGORY_CHANGE_COSTS matches the categories of the formats, add the specified cost. Otherwise, if the categories are the same, add no cost. If the categories differ but no specific cost is defined for that change, add a default cost.
-                                if (fromCategories.includes(c.from) && toCategories.includes(c.to))
-                                    return totalCost + c.cost;
-                                return totalCost + DEFAULT_CATEGORY_CHANGE_COST;
-                            }, 0);
-                        }
-                        else if (!fromCategories.some(c => toCategories.includes(c))) {
-                            const costs = CATEGORY_CHANGE_COSTS.filter(c =>
-                                fromCategories.includes(c.from) && toCategories.includes(c.to)
-                            )
-                            if (costs.length === 0) cost += DEFAULT_CATEGORY_CHANGE_COST; // If no specific cost is defined for this category change, use the default cost
-                            else cost += Math.min(...costs.map(c => c.cost)); // If multiple category changes are involved, use the lowest cost defined for those changes. This allows for more nuanced cost calculations when formats belong to multiple categories.
-                        }
-                    }
-                    else if (fromCategory || toCategory) {
-                        // If one format has a category and the other doesn't, consider it a category change
-                        // Should theoretically never be encountered, unless the MIME type is misspecified
-                        cost += DEFAULT_CATEGORY_CHANGE_COST;
-                    }
-                    cost += PRIORITY_COST * handlerIndex; // Add cost based on handler priority (lower index means higher priority)
-                    if (!to.format.lossless) cost *= LOSSY_COST_MULTIPLIER; // If the output format is lossy or unspecified, apply the lossy cost multiplier
                     this.edges.push({
                         from: from,
                         to: to,
                         handler: handler,
-                        cost: cost
+                        cost: this.costFunction(
+                            from, 
+                            to, 
+                            strictCategories, 
+                            handler, 
+                            handlerIndex
+                        )
                     });
                     this.nodes[from.index].edges.push(this.edges.length - 1);
                 });
             });
-            handlerIndex ++;
+            handlerIndex++;
         });
         const endTime = performance.now();
         console.log(`Traversion graph initialized in ${(endTime - startTime).toFixed(2)} ms with ${this.nodes.length} nodes and ${this.edges.length} edges.`);
     }
+    /**
+     * Cost function for calculating the cost of converting from one format to another using a specific handler.
+     */
+    private costFunction(
+        from: { format: FileFormat; index: number; }, 
+        to: { format: FileFormat; index: number; }, 
+        strictCategories: boolean, 
+        handler: string, 
+        handlerIndex: number
+    ) {
+        let cost = DEPTH_COST; // Base cost for each conversion step
+
+        // Calculate category change cost
+        const fromCategory = from.format.category || from.format.mime.split("/")[0];
+        const toCategory = to.format.category || to.format.mime.split("/")[0];
+        if (fromCategory && toCategory) {
+            const fromCategories = Array.isArray(fromCategory) ? fromCategory : [fromCategory];
+            const toCategories = Array.isArray(toCategory) ? toCategory : [toCategory];
+            if (strictCategories) {
+                cost += this.categoryChangeCosts.reduce((totalCost, c) => {
+                    // If the category change defined in CATEGORY_CHANGE_COSTS matches the categories of the formats, add the specified cost. Otherwise, if the categories are the same, add no cost. If the categories differ but no specific cost is defined for that change, add a default cost.
+                    if (fromCategories.includes(c.from) && toCategories.includes(c.to) && (!c.handler || c.handler === handler))
+                        return totalCost + c.cost;
+                    return totalCost + DEFAULT_CATEGORY_CHANGE_COST;
+                }, 0);
+            }
+            else if (!fromCategories.some(c => toCategories.includes(c))) {
+                const costs = this.categoryChangeCosts.filter(c => fromCategories.includes(c.from) && toCategories.includes(c.to) && (!c.handler || c.handler === handler)
+                );
+                if (costs.length === 0) cost += DEFAULT_CATEGORY_CHANGE_COST; // If no specific cost is defined for this category change, use the default cost
+                else cost += Math.min(...costs.map(c => c.cost)); // If multiple category changes are involved, use the lowest cost defined for those changes. This allows for more nuanced cost calculations when formats belong to multiple categories.
+            }
+        }
+        else if (fromCategory || toCategory) {
+            // If one format has a category and the other doesn't, consider it a category change
+            // Should theoretically never be encountered, unless the MIME type is misspecified
+            cost += DEFAULT_CATEGORY_CHANGE_COST;
+        }
+
+        // Add cost based on handler priority
+        cost += HANDLER_PRIORITY_COST * handlerIndex;
+
+        // Add cost based on format priority
+        const handlerObj = handlers.find(h => h.name === handler)
+        cost += FORMAT_PRIORITY_COST * (handlerObj?.supportedFormats?.findIndex(f => f.mime === to.format.mime) ?? 0);
+
+        // Add cost multiplier for lossy conversions
+        if (!to.format.lossless) cost *= LOSSY_COST_MULTIPLIER;
+
+        return cost;
+    }
+
     public getData() : {nodes: Node[], edges: Edge[]} {
         return {nodes: this.nodes, edges: this.edges};
     }
@@ -120,6 +173,15 @@ export class TraversionGraph {
             output += `${index}: ${edge.from.format.mime} -> ${edge.to.format.mime} (handler: ${edge.handler}, cost: ${edge.cost})\n`;
         });
         console.log(output);
+    }
+
+    private listeners: Array<(state: string, path: ConvertPathNode[]) => void> = [];
+    public addPathEventListener(listener: (state: string, path: ConvertPathNode[]) => void) {
+        this.listeners.push(listener);
+    }
+
+    private dispatchEvent(state: string, path: ConvertPathNode[]) {
+        this.listeners.forEach(l => l(state, path));
     }
 
     public async* searchPath(from: ConvertPathNode, to: ConvertPathNode, simpleMode: boolean) : AsyncGenerator<ConvertPathNode[]> {
@@ -142,32 +204,41 @@ export class TraversionGraph {
             // Get the node with the lowest cost
             let current = queue.poll()!;
             const indexInVisited = visited.indexOf(current.index);
-            if (indexInVisited >= 0 && indexInVisited < current.visitedBorder) continue;
+            if (indexInVisited >= 0 && indexInVisited < current.visitedBorder) {
+                this.dispatchEvent("skipped", current.path);
+                continue;
+            }
             if (current.index === toIndex) {
                 // Return the path of handlers and formats to get from the input format to the output format
-                console.log(`Found path at iteration ${iterations} with cost ${current.cost}: ${current.path.map(p => p.handler.name + "(" + p.format.mime + ")").join(" -> ")}`);
                 if (simpleMode || !to.handler || to.handler.name === current.path.at(-1)?.handler.name) {
-                    console.log(`Path valid! Yielding path: ${current.path.map(p => p.format.mime).join(" → ")}`);
+                    console.log(`Found path at iteration ${iterations} with cost ${current.cost}: ${current.path.map(p => p.handler.name + "(" + p.format.mime + ")").join(" -> ")}`);
+                    this.dispatchEvent("found", current.path);
                     yield current.path; 
                     pathsFound++;
+                }
+                else {
+                    console.log(`Unvalid path at iteration ${iterations} with cost ${current.cost}: ${current.path.map(p => p.handler.name + "(" + p.format.mime + ")").join(" -> ")}`);
+                    this.dispatchEvent("skipped", current.path);
                 }
                 continue; 
             }
             visited.push(current.index);
+            this.dispatchEvent("searching", current.path);
             this.nodes[current.index].edges.forEach(edgeIndex => {
                 let edge = this.edges[edgeIndex];
                 const indexInVisited = visited.indexOf(edge.to.index);
                 if (indexInVisited >= 0 && indexInVisited < current.visitedBorder) return;
                 const handler = handlers.find(h => h.name === edge.handler);
                 if (!handler) return; // If the handler for this edge is not found, skip it
+                
                 queue.add({
                     index: edge.to.index,
-                    cost: current.cost + edge.cost,
+                    cost: current.cost + (edge.to.index === toIndex ? 0 : edge.cost),
                     path: current.path.concat({handler: handler, format: edge.to.format}),
                     visitedBorder: visited.length
                 });
             });
-            if (iterations % 100 === 0) {
+            if (iterations % LOG_FREQUENCY === 0) {
                 console.log(`Still searching... Iterations: ${iterations}, Paths found: ${pathsFound}, Queue length: ${queue.size()}`);
             }
         }
