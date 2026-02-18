@@ -1,3 +1,4 @@
+import { int } from "three/tsl";
 import { ConvertPathNode, type FileFormat } from "./FormatHandler.ts";
 import handlers from "./handlers";
 import { PriorityQueue } from './PriorityQueue.ts';
@@ -14,6 +15,11 @@ interface CategoryChangeCost {
     handler?: string; // Optional handler name to specify that this cost only applies when using a specific handler for the category change. If not specified, the cost applies to all handlers for that category change.
     cost: number;
 };
+
+interface CategoryAdaptiveCost {
+    categories: string[]; // List of sequential categories
+    cost: number; // Cost to apply when a conversion involves all of the specified categories in sequence.
+}
 
 
 // Parameters for pathfinding algorithm.
@@ -40,19 +46,23 @@ export interface Edge {
 export class TraversionGraph {
     private nodes: Node[] = [];
     private edges: Edge[] = [];
-    private categoryChangeCosts: Array<CategoryChangeCost> = [
+    private categoryChangeCosts: CategoryChangeCost[] = [
         {from: "image", to: "video", cost: 0.2}, // Almost lossless
         {from: "video", to: "image", cost: 0.4}, // Potentially lossy and more complex
-        {from: "image", to: "audio", cost: 1.4}, // Extremely lossy
         {from: "image", to: "audio", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert images to audio
         {from: "audio", to: "image", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert audio to images
         {from: "text", to: "audio", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert text to audio
         {from: "audio", to: "text", handler: "ffmpeg", cost: 100}, // FFMpeg can't convert audio to text
+        {from: "image", to: "audio", cost: 10.4}, // Extremely lossy
         {from: "audio", to: "image", cost: 1}, // Very lossy
         {from: "video", to: "audio", cost: 1.4}, // Might be lossy 
         {from: "audio", to: "video", cost: 1}, // Might be lossy
         {from: "text", to: "image", cost: 0.5}, // Depends on the content and method, but can be relatively efficient for simple images
         {from: "image", to: "text", cost: 0.5}, // Depends on the content and method, but can be relatively efficient for simple images
+    ];
+    private categoryAdaptiveCosts: CategoryAdaptiveCost[] = [
+        { categories: ["image", "video", "audio"], cost: 10000 }, // Converting from image to audio through video is especially lossy
+        { categories: ["audio", "video", "image"], cost: 10000 }, // Converting from audio to image through video is especially lossy
     ];
 
     public addCategoryChangeCost(from: string, to: string, cost: number, handler?: string) {
@@ -69,6 +79,23 @@ export class TraversionGraph {
     public hasCategoryChangeCost(from: string, to: string, handler?: string) {
         return this.categoryChangeCosts.some(c => c.from === from && c.to === to && c.handler === handler?.toLowerCase());
     }
+
+
+    public addCategoryAdaptiveCost(categories: string[], cost: number) {
+        this.categoryAdaptiveCosts.push({categories, cost});
+    }
+    public removeCategoryAdaptiveCost(categories: string[]) {
+        this.categoryAdaptiveCosts = this.categoryAdaptiveCosts.filter(c => !(c.categories.length === categories.length && c.categories.every((cat, index) => cat === categories[index])));
+    }
+    public updateCategoryAdaptiveCost(categories: string[], cost: number) {
+        const costEntry = this.categoryAdaptiveCosts.find(c => c.categories.length === categories.length && c.categories.every((cat, index) => cat === categories[index]));
+        if (costEntry) costEntry.cost = cost;
+        else this.addCategoryAdaptiveCost(categories, cost);
+    }
+    public hasCategoryAdaptiveCost(categories: string[]) {
+        return this.categoryAdaptiveCosts.some(c => c.categories.length === categories.length && c.categories.every((cat, index) => cat === categories[index]));
+    }
+
     /**
      * Initializes the traversion graph based on the supported formats and handlers. This should be called after all handlers have been registered and their supported formats have been cached in window.supportedFormatCache. The graph is built by creating nodes for each unique file format and edges for each possible conversion between formats based on the handlers' capabilities. 
      * @param strictCategories If true, the algorithm will apply category change costs more strictly, even when formats share categories. This can lead to more accurate pathfinding at the cost of potentially longer paths and increased search time. If false, category change costs will only be applied when formats do not share any categories, allowing for more flexible pathfinding that may yield shorter paths but with less nuanced cost calculations.
@@ -270,10 +297,11 @@ export class TraversionGraph {
                 const handler = handlers.find(h => h.name === edge.handler);
                 if (!handler) return; // If the handler for this edge is not found, skip it
                 
+                let path = current.path.concat({handler: handler, format: edge.to.format});
                 queue.add({
                     index: edge.to.index,
-                    cost: current.cost + edge.cost,
-                    path: current.path.concat({handler: handler, format: edge.to.format}),
+                    cost: current.cost + edge.cost + this.calculateAdaptiveCost(path),
+                    path: path,
                     visitedBorder: visited.length
                 });
             });
@@ -282,5 +310,31 @@ export class TraversionGraph {
             }
         }
         console.log(`Path search completed. Total iterations: ${iterations}, Total paths found: ${pathsFound}`);
+    }
+
+    private calculateAdaptiveCost(path: ConvertPathNode[]) : number {
+        let cost = 0;
+        const categoriesInPath = path.map(p => p.format.category || p.format.mime.split("/")[0]);
+        this.categoryAdaptiveCosts.forEach(c => {
+            let pathPtr = categoriesInPath.length - 1, categoryPtr = c.categories.length - 1;
+            while (true) {
+                if (categoriesInPath[pathPtr] === c.categories[categoryPtr]) {
+                    categoryPtr--;
+                    pathPtr--;
+
+                    if (categoryPtr < 0) {
+                        cost += c.cost;
+                        break;
+                    }
+                    if (pathPtr < 0) break;
+                }
+                else if (categoryPtr + 1 < c.categories.length && categoriesInPath[pathPtr] === c.categories[categoryPtr + 1]) {
+                    pathPtr--;
+                    if (pathPtr < 0) break;
+                }
+                else break;
+            }
+        });
+        return cost;
     }
 }
