@@ -1,5 +1,6 @@
 import { ConvertPathNode, type FileFormat } from "./FormatHandler.ts";
 import handlers from "./handlers";
+import { PriorityQueue } from './PriorityQueue.ts';
 
 
 // Parameters for pathfinding algorithm. Adjust as needed.
@@ -32,6 +33,13 @@ export interface Edge {
     handler: string;
     cost: number;
 };
+
+interface QueueNode {
+    index: number;
+    cost: number;
+    path: ConvertPathNode[];
+    visitedBorder: number;
+}
 
 export class TraversionGraph {
     private nodes: Node[] = [];
@@ -111,21 +119,24 @@ export class TraversionGraph {
     public async* searchPath(from: ConvertPathNode, to: ConvertPathNode, simpleMode: boolean) : AsyncGenerator<ConvertPathNode[]> {
         // Dijkstra's algorithm
         // Priority queue of {index, cost, path}
-        let queue: Array<{index: number, cost: number, path: ConvertPathNode[]}> = [];
-        let visited = new Set<number>();
+        let queue: PriorityQueue<QueueNode> = new PriorityQueue<QueueNode>(
+            1000,
+            (a: QueueNode, b: QueueNode) => a.cost - b.cost
+        );
+        let visited = new Array<number>();
         let fromIndex = this.nodes.findIndex(node => node.mime === from.format.mime);
         let toIndex = this.nodes.findIndex(node => node.mime === to.format.mime);
         if (fromIndex === -1 || toIndex === -1) return []; // If either format is not in the graph, return empty array
-        queue.push({index: fromIndex, cost: 0, path: [from] });
+        queue.add({index: fromIndex, cost: 0, path: [from], visitedBorder: visited.length });
         console.log(`Starting path search from ${from.format.mime}(${from.handler?.name}) to ${to.format.mime}(${to.handler?.name}) (simple mode: ${simpleMode})`);
         let iterations = 0;
         let pathsFound = 0;
-        while (queue.length > 0) {
+        while (queue.size() > 0) {
             iterations++;
             // Get the node with the lowest cost
-            queue.sort((a, b) => a.cost - b.cost);
-            let current = queue.shift()!;
-            if (visited.has(current.index)) continue;
+            let current = queue.poll()!;
+            const indexInVisited = visited.indexOf(current.index);
+            if (indexInVisited >= 0 && indexInVisited < current.visitedBorder) continue;
             if (current.index === toIndex) {
                 // Return the path of handlers and formats to get from the input format to the output format
                 console.log(`Found path at iteration ${iterations} with cost ${current.cost}: ${current.path.map(p => p.handler.name + "(" + p.format.mime + ")").join(" -> ")}`);
@@ -136,20 +147,22 @@ export class TraversionGraph {
                 }
                 continue; 
             }
-            visited.add(current.index);
+            visited.push(current.index);
             this.nodes[current.index].edges.forEach(edgeIndex => {
                 let edge = this.edges[edgeIndex];
-                if (visited.has(edge.to.index)) return;
+                const indexInVisited = visited.indexOf(edge.to.index);
+                if (indexInVisited >= 0 && indexInVisited < current.visitedBorder) return;
                 const handler = handlers.find(h => h.name === edge.handler);
                 if (!handler) return; // If the handler for this edge is not found, skip it
-                queue.push({
+                queue.add({
                     index: edge.to.index,
                     cost: current.cost + edge.cost,
-                    path: current.path.concat({handler: handler, format: edge.to.format})
+                    path: current.path.concat({handler: handler, format: edge.to.format}),
+                    visitedBorder: visited.length
                 });
             });
             if (iterations % 100 === 0) {
-                console.log(`Still searching... Iterations: ${iterations}, Paths found: ${pathsFound}, Queue length: ${queue.length}`);
+                console.log(`Still searching... Iterations: ${iterations}, Paths found: ${pathsFound}, Queue length: ${queue.size()}`);
             }
         }
         console.log(`Path search completed. Total iterations: ${iterations}, Total paths found: ${pathsFound}`);
